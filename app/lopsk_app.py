@@ -852,7 +852,7 @@ class LoPSKApp:
         except Exception as e:
             self.rx_src = None
             self.rx_mode = None
-            messagebox.showerror(APP_NAME, f"Couldn't start the receiver:\n{e}")
+            messagebox.showerror(APP_NAME, f"Couldn't start the receiver:\n{e}" + rtl_help(str(e)))
             return
         self.rx_btn.config(text="Stop listening")
         self.src_cb.state(["disabled"])
@@ -1221,6 +1221,27 @@ class LoPSKApp:
         self.save_cfg()
         self.disconnect()
         self.root.destroy()
+
+
+def rtl_help(err):
+    """Plain-English fixes for the usual RTL-SDR open errors."""
+    e = err.upper()
+    if "LIBUSB" not in e and "COULD NOT OPEN SDR" not in e and "NO DEVICES" not in e:
+        return ""
+    if "NO DEVICES" in e or "NOT_FOUND" in e:
+        return ("\n\nNo RTL-SDR found. Check it's plugged in; on Windows install the WinUSB driver "
+                "with Zadig (see below).")
+    tips = ("\n\nThe dongle is there but couldn't be opened. Try, in order:\n"
+            "1. Close anything else using it (LoFT8, SDR#, SDR++, SDRangel, another LoPSK). "
+            "Check Task Manager for leftover python/pythonw.\n"
+            "2. Unplug the dongle, wait 5 seconds, plug it back in.\n"
+            "3. Plug it straight into a USB port on the PC, not a hub.\n")
+    if sys.platform == "win32":
+        tips += ("4. Run Zadig, tick Options → List All Devices, pick \"Bulk-In, Interface (Interface 0)\" "
+                 "and install WinUSB.")
+    else:
+        tips += ("4. If the TV-tuner driver grabbed it, reboot once (the installer blocks that driver).")
+    return tips
 
 
 def waterfall_colors(norm):
