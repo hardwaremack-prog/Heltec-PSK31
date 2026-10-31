@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+firmware/build/
+tests/home/
+tests/host/sim
+tests/host/*.txt
+tests/host/LoPSK_host.ino
