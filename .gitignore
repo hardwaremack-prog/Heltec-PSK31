@@ -5,3 +5,4 @@ tests/home/
 tests/host/sim
 tests/host/*.txt
 tests/host/LoPSK_host.ino
+tests/home_heard/

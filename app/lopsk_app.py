@@ -23,6 +23,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 
+import heardme
 import psk31
 import psk31rx
 import rx_sources
@@ -34,7 +35,7 @@ except ImportError:                       # handled nicely in the UI
     serial = None
 
 APP_NAME = "LoPSK"
-VERSION = "1.0"
+VERSION = "1.1"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 FW_DIR = os.path.join(APP_DIR, "firmware")
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".lopsk.json")
@@ -71,7 +72,8 @@ DEFAULTS = {
     "preset": list(FREQ_PRESETS)[0], "dial_mhz": "432.100", "mode": "PSK31",
     "tx_hz": "1000", "cal_hz": "0", "power": 10, "board": list(BOARDS)[0],
     "licensed": False, "rx_source": "", "rtl_ppm": "0", "rtl_gain": "auto",
-    "tx_follows_rx": True, "squelch": 35, "afc": True, "steer": 0, "auto_end": True,
+    "tx_follows_rx": True, "squelch": 35, "afc": True, "steer": 0, "auto_end": True, "my_grid": "", "heard_call": "", "heard_window": "Last 24 hours",
+    "heard_mode": "PSK31 only", "heard_auto": False,
 }
 
 BG = "#11161c"; PANEL = "#1a222b"; FG = "#e6edf3"; MUTED = "#8b98a5"
@@ -106,8 +108,8 @@ class LoPSKApp:
 
         root.title(f"{APP_NAME} — PSK31 from your LoRa radio")
         root.configure(bg=BG)
-        root.geometry("1120x920")
-        root.minsize(980, 820)
+        root.geometry("1120x960")
+        root.minsize(980, 860)
         self.build_style()
         self.build_ui()
         self.refresh_ports()
@@ -172,6 +174,10 @@ class LoPSKApp:
                      rowheight=21, borderwidth=0, font=(MONO, 9))
         st.configure("Treeview.Heading", background="#26313c", foreground=MUTED, relief="flat")
         st.map("Treeview", background=[("selected", "#2b4a73")])
+        st.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        st.configure("TNotebook.Tab", background="#1f2831", foreground=MUTED, padding=(18, 6),
+                     font=("", 11, "bold"))
+        st.map("TNotebook.Tab", background=[("selected", PANEL)], foreground=[("selected", ACCENT)])
         self.root.option_add("*TCombobox*Listbox.background", PANEL)
         self.root.option_add("*TCombobox*Listbox.foreground", FG)
 
@@ -193,6 +199,9 @@ class LoPSKApp:
             "rx_source": S(value=c["rx_source"]), "rtl_ppm": S(value=c["rtl_ppm"]), "rtl_gain": S(value=c["rtl_gain"]),
             "tx_follows_rx": B(value=c["tx_follows_rx"]), "squelch": I(value=c["squelch"]),
             "afc": B(value=c["afc"]), "steer": I(value=c["steer"]), "auto_end": B(value=c["auto_end"]),
+            "my_grid": S(value=c["my_grid"]), "heard_call": S(value=c["heard_call"]),
+            "heard_window": S(value=c["heard_window"]), "heard_mode": S(value=c["heard_mode"]),
+            "heard_auto": B(value=c["heard_auto"]),
         }
         if v["preset"].get() not in FREQ_PRESETS:
             v["preset"].set("Custom")
@@ -208,8 +217,7 @@ class LoPSKApp:
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1, uniform="c")
         body.columnconfigure(1, weight=1, uniform="c")
-        body.rowconfigure(1, weight=3)
-        body.rowconfigure(2, weight=2)
+        body.rowconfigure(1, weight=1)
 
         # --- radio
         rp = self.panel(body, "Radio")
@@ -262,15 +270,23 @@ class LoPSKApp:
         for key in ("dial_mhz", "tx_hz", "cal_hz"):
             v[key].trace_add("write", lambda *a: self.update_freq_label())
 
-        # --- receive
-        rxp = self.panel(body, "Receive")
-        rxp.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
+        # --- tabs: Operate (receive + transmit) and Heard Me (PSKReporter)
+        self.nb = ttk.Notebook(body)
+        self.nb.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        op = ttk.Frame(self.nb, padding=(0, 8, 0, 0))
+        hm = ttk.Frame(self.nb, padding=(0, 8, 0, 0))
+        self.nb.add(op, text="Operate")
+        self.nb.add(hm, text="Heard Me")
+        op.columnconfigure(0, weight=1)
+        op.rowconfigure(0, weight=3)
+        op.rowconfigure(1, weight=2)
+        rxp = self.panel(op, "Receive")
+        rxp.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
         self.build_rx(rxp)
-
-        # --- transmit
-        txp = self.panel(body, "Transmit")
-        txp.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        txp = self.panel(op, "Transmit")
+        txp.grid(row=1, column=0, sticky="nsew")
         self.build_tx(txp)
+        self.build_heard(hm)
 
         self.update_freq_label()
         if serial is None:
@@ -768,6 +784,196 @@ class LoPSKApp:
                 self.ui_q.put(("flashdone", -1))
         threading.Thread(target=run, daemon=True).start()
 
+    # ---------------------------------------------------------- Heard Me (PSKReporter)
+    HEARD_WINDOWS = {"Last 15 minutes": 900, "Last hour": 3600, "Last 6 hours": 21600, "Last 24 hours": 86400}
+    HEARD_MODES = {"PSK31 only": "PSK31", "PSK63 only": "PSK63", "All modes": None}
+
+    def build_heard(self, tab):
+        v = self.vars
+        self.reporter = heardme.Reporter()
+        self.heard_rows = []
+        self.heard_next_auto = 0
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+
+        qp = self.panel(tab, "Who heard me?  (reception reports from PSKReporter.info)")
+        qp.grid(row=0, column=0, sticky="we", pady=(0, 8))
+        row = ttk.Frame(qp, style="Panel.TFrame")
+        row.grid(row=1, column=0, sticky="we")
+        ttk.Label(row, text="Callsign", style="Panel.TLabel").pack(side="left")
+        ttk.Entry(row, textvariable=v["heard_call"], width=10).pack(side="left", padx=(4, 12))
+        v["heard_call"].trace_add("write", lambda *a: self.force_upper("heard_call"))
+        ttk.Label(row, text="My grid", style="Panel.TLabel").pack(side="left")
+        ttk.Entry(row, textvariable=v["my_grid"], width=7).pack(side="left", padx=(4, 12))
+        v["my_grid"].trace_add("write", lambda *a: self.force_upper("my_grid"))
+        ttk.Combobox(row, textvariable=v["heard_window"], values=list(self.HEARD_WINDOWS), state="readonly",
+                     width=15).pack(side="left", padx=(0, 6))
+        ttk.Combobox(row, textvariable=v["heard_mode"], values=list(self.HEARD_MODES), state="readonly",
+                     width=11).pack(side="left", padx=(0, 10))
+        self.heard_btn = ttk.Button(row, text="Check now", style="Accent.TButton", command=self.heard_check)
+        self.heard_btn.pack(side="left")
+        ttk.Checkbutton(row, text="Re-check every 5 min", variable=v["heard_auto"]).pack(side="left", padx=(10, 0))
+        row2 = ttk.Frame(qp, style="Panel.TFrame")
+        row2.grid(row=2, column=0, sticky="we", pady=(8, 0))
+        ttk.Button(row2, text="Show all-time log", style="Small.TButton", command=self.heard_show_log)\
+            .pack(side="left")
+        ttk.Button(row2, text="Open PSKReporter map", style="Small.TButton", command=self.heard_open_map)\
+            .pack(side="left", padx=6)
+        ttk.Button(row2, text="Export CSV…", style="Small.TButton", command=self.heard_export)\
+            .pack(side="left")
+        self.heard_lbl = tk.Label(qp, text="", bg=PANEL, fg=MUTED, anchor="w", justify="left", wraplength=1040)
+        self.heard_lbl.grid(row=3, column=0, sticky="we", pady=(8, 0))
+        qp.columnconfigure(0, weight=1)
+
+        lp = self.panel(tab, "Stations that heard you")
+        lp.grid(row=1, column=0, sticky="nsew")
+        cols = ("time", "ago", "call", "grid", "country", "dist", "dir", "freq", "mode", "snr")
+        self.heard_tree = ttk.Treeview(lp, columns=cols, show="headings", height=12)
+        for c, w, t, anc in (("time", 120, "UTC", "w"), ("ago", 70, "Ago", "e"), ("call", 90, "Heard by", "w"),
+                             ("grid", 70, "Grid", "w"), ("country", 150, "Country", "w"),
+                             ("dist", 150, "Distance", "e"), ("dir", 50, "Dir", "w"),
+                             ("freq", 110, "Freq (MHz)", "e"), ("mode", 60, "Mode", "w"), ("snr", 50, "SNR", "e")):
+            self.heard_tree.heading(c, text=t, anchor=anc, command=lambda c=c: self.heard_sort(c))
+            self.heard_tree.column(c, width=w, anchor=anc, stretch=(c == "country"))
+        self.heard_tree.grid(row=1, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(lp, orient="vertical", command=self.heard_tree.yview)
+        sb.grid(row=1, column=1, sticky="ns")
+        self.heard_tree.configure(yscrollcommand=sb.set)
+        self.heard_tree.tag_configure("new", foreground=GOOD)
+        self.heard_tree.tag_configure("far", foreground=ACCENT)
+        lp.columnconfigure(0, weight=1)
+        lp.rowconfigure(1, weight=1)
+        self.heard_sum = tk.Label(lp, text="", bg=PANEL, fg=FG, anchor="w", font=("", 10, "bold"))
+        self.heard_sum.grid(row=2, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        self.heard_status("Enter your callsign and press Check now. Reports appear when stations running fldigi, "
+                          "WSJT-X or another reporting program decode you — on 70 cm that may be nobody yet. "
+                          "Every report is also saved to your all-time log.", MUTED)
+        self.root.after(500, self.heard_show_log_quiet)
+
+    def heard_status(self, text, color=MUTED):
+        self.heard_lbl.config(text=text, fg=color)
+
+    def heard_callsign(self):
+        call = self.vars["heard_call"].get().strip().upper() or self.vars["callsign"].get().strip().upper()
+        if call and not self.vars["heard_call"].get().strip():
+            self.vars["heard_call"].set(call)
+        return call
+
+    def heard_check(self, auto=False):
+        call = self.heard_callsign()
+        if len(call) < 3:
+            if not auto:
+                messagebox.showinfo(APP_NAME, "Enter your callsign first.")
+            return
+        secs = self.HEARD_WINDOWS.get(self.vars["heard_window"].get(), 86400)
+        mode = self.HEARD_MODES.get(self.vars["heard_mode"].get())
+        self.save_cfg()
+        self.heard_btn.state(["disabled"])
+        self.heard_status(f"Asking PSKReporter who heard {call}…", MUTED)
+
+        def run():
+            try:
+                reports, cached = self.reporter.fetch(call, secs, mode)
+                self.ui_q.put(("heard", (call, reports, cached, None)))
+            except heardme.TooSoon as e:
+                self.ui_q.put(("heard", (call, None, False, f"PSKReporter asks programs to check at most every "
+                                         f"5 minutes — try again in {int(str(e)) // 60}:{int(str(e)) % 60:02d}.")))
+            except Exception as e:
+                msg = str(e)
+                if "urlopen" in msg or "Errno" in msg or "timed out" in msg:
+                    msg = f"couldn't reach PSKReporter ({msg}). Check your internet connection."
+                self.ui_q.put(("heard", (call, None, False, msg)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def heard_result(self, call, reports, cached, err):
+        self.heard_btn.state(["!disabled"])
+        self.heard_next_auto = time.time() + heardme.MIN_INTERVAL + 5
+        if err:
+            self.heard_status(err, ACCENT if "5 minutes" in err else BAD)
+            return
+        when = time.strftime("%H:%M:%S UTC", time.gmtime())
+        win = self.vars["heard_window"].get().lower()
+        if reports:
+            self.heard_status(f"{'(cached) ' if cached else ''}Checked {when} — {win}. Green = within the last "
+                              "15 minutes, orange = farthest. Click a column header to sort.", GOOD)
+        else:
+            self.heard_status(f"Checked {when}: nobody has reported hearing {call} {win.replace('last', 'in the last')}. "
+                              "Only stations that upload to PSKReporter show up here.", ACCENT)
+        self.heard_fill(reports, f"{call}, {win}")
+
+    def heard_fill(self, reports, label):
+        heardme.enrich(reports, self.vars["my_grid"].get().strip())
+        self.heard_rows = reports
+        self.heard_draw()
+        self.heard_sum.config(text=f"{label}:  " + heardme.summary(reports))
+
+    def heard_draw(self):
+        t = self.heard_tree
+        t.delete(*t.get_children())
+        now = time.time()
+        far = max((r for r in self.heard_rows if r.get("km") is not None), key=lambda r: r["km"], default=None)
+        for r in self.heard_rows:
+            ago = now - r["time"]
+            ago_s = f"{ago / 60:.0f} min" if ago < 3600 else (f"{ago / 3600:.1f} h" if ago < 172800 else f"{ago / 86400:.0f} d")
+            km = r.get("km")
+            dist = f"{km * 0.621371:,.0f} mi / {km:,.0f} km" if km is not None else ""
+            brg = heardme.compass(r["bearing"]) if r.get("bearing") is not None else ""
+            freq = f"{r['freq_hz'] / 1e6:.6f}" if r["freq_hz"] else ""
+            snr = r["snr"] if r["snr"] not in (None, "") else ""
+            tag = ("far",) if r is far else (("new",) if ago < 900 else ())
+            t.insert("", "end", values=(time.strftime("%m-%d %H:%M:%S", time.gmtime(r["time"])), ago_s, r["receiver"],
+                                        r["locator"], r["country"], dist, brg, freq, r["mode"], snr), tags=tag)
+
+    def heard_sort(self, col):
+        keys = {"time": lambda r: -r["time"], "ago": lambda r: -r["time"], "call": lambda r: r["receiver"],
+                "grid": lambda r: r["locator"], "country": lambda r: r["country"],
+                "dist": lambda r: -(r.get("km") or -1), "dir": lambda r: r.get("bearing") or 0,
+                "freq": lambda r: r["freq_hz"], "mode": lambda r: r["mode"],
+                "snr": lambda r: -float(r["snr"]) if str(r["snr"]).lstrip("-").isdigit() else 999}
+        self.heard_rows.sort(key=keys[col])
+        self.heard_draw()
+
+    def heard_show_log(self):
+        call = self.heard_callsign()
+        rows = self.reporter.load_log(call or None)
+        self.heard_fill(rows, f"All-time log{' for ' + call if call else ''}")
+        self.heard_status(f"Your all-time log ({len(rows)} reports), saved in {heardme.LOG_PATH}. It keeps every "
+                          "report LoPSK has ever fetched, so nothing is lost after PSKReporter's 24 hours.", MUTED)
+
+    def heard_show_log_quiet(self):
+        call = self.heard_callsign()
+        if call and self.reporter.load_log(call):
+            self.heard_show_log()
+
+    def heard_open_map(self):
+        call = self.heard_callsign()
+        if len(call) < 3:
+            messagebox.showinfo(APP_NAME, "Enter your callsign first.")
+            return
+        import webbrowser
+        webbrowser.open(heardme.map_link(call, self.HEARD_WINDOWS.get(self.vars["heard_window"].get(), 86400)))
+
+    def heard_export(self):
+        if not self.heard_rows:
+            messagebox.showinfo(APP_NAME, "Nothing to export yet — check PSKReporter or open your log first.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="lopsk_heard_me.csv",
+                                            filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        import csv
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["utc", "heard_by", "grid", "country", "miles", "km", "bearing", "freq_mhz", "mode", "snr"])
+            for r in self.heard_rows:
+                km = r.get("km")
+                w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["time"])), r["receiver"], r["locator"],
+                            r["country"], f"{km * 0.621371:.0f}" if km is not None else "",
+                            f"{km:.0f}" if km is not None else "",
+                            f"{r['bearing']:.0f}" if r.get("bearing") is not None else "",
+                            f"{r['freq_hz'] / 1e6:.6f}" if r["freq_hz"] else "", r["mode"], r["snr"]])
+        self.heard_status(f"Exported {len(self.heard_rows)} reports to {os.path.basename(path)}.", GOOD)
+
     # ---------------------------------------------------------- receive
     SRC_RTL = "RTL-SDR dongle (tunes the dial frequency itself)"
     SRC_LORA = "LoRa board — signal meter only (can't decode PSK)"
@@ -1098,6 +1304,8 @@ class LoPSKApp:
                     self.browser = {}
                 elif kind == "wav":
                     self.show_wav(*val)
+                elif kind == "heard":
+                    self.heard_result(*val)
                 elif kind == "serial_err":
                     self.status(f"Serial error: {val}", BAD)
                     self.disconnect()
@@ -1192,6 +1400,10 @@ class LoPSKApp:
             self.relisten_lora()
 
     def tick(self):
+        if (self.vars["heard_auto"].get() and time.time() >= self.heard_next_auto
+                and self.heard_btn.instate(["!disabled"]) and len(self.heard_callsign()) >= 3):
+            self.heard_next_auto = time.time() + heardme.MIN_INTERVAL + 5
+            self.heard_check(auto=True)
         self.vars_afc = bool(self.vars["afc"].get())
         self.vars_sq = float(self.vars["squelch"].get()) / 100.0
         if self.tx:

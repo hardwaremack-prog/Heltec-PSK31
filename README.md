@@ -44,6 +44,14 @@ Then:
 
 **Play on speakers / Save WAV:** hear, or save, exactly what the board will send — computed tick-for-tick the same way the firmware does it. Open the WAV in fldigi or with Decode WAV to check it.
 
+**Heard Me tab:** enter your callsign and press **Check now** to see every station that reported hearing you on [PSKReporter](https://pskreporter.info/pskmap.html): when, their grid and country, how far away (miles and km) and in which direction, the frequency, mode and signal report. Green rows came in during the last 15 minutes; the orange row is your farthest. Pick a time window (15 minutes to 24 hours) and PSK31, PSK63 or all modes, tick **Re-check every 5 min** to leave it watching, or **Open PSKReporter map** to see them on the map. Put your grid square in **My grid** for exact distances.
+
+PSKReporter only keeps 24 hours, so LoPSK saves every report it fetches to an all-time log (`.lopsk_heard.csv` in your home folder). **Show all-time log** brings it all back, and **Export CSV** saves the current list. The tab checks at most once every 5 minutes, as PSKReporter asks.
+
+Reports only come from listeners whose software uploads them (fldigi, WSJT-X and similar). On 70 cm that may be nobody at first, so an empty list doesn't mean nobody heard you.
+
+![Heard Me](docs/heard-me.png)
+
 **Compatibility phase mode:** if receivers see your carrier but can't decode you, tick this. It re-keys the carrier on every nudge, the way LoFT8 changes tones, in case a particular chip ignores frequency changes while transmitting.
 
 ## How it was tested
@@ -54,11 +62,11 @@ Then:
 - The full app was driven end-to-end against a pretend board: the bits the "board" sent decoded back to exactly the typed text, while two simulated stations were decoded on the waterfall and in the signal browser.
 - Firmware compiles for all three boards. **Not yet tested on a physical board** — your first transmission is the real test.
 
-Tests are in `tests/`: `test_loop.py` (encode → noise → decode), `test_firmware.py` + `tests/host/` (runs the real firmware on a PC), `test_app.py` + `fake_board.py` (whole app).
+Tests are in `tests/`: `test_loop.py` (encode → noise → decode), `test_firmware.py` + `tests/host/` (runs the real firmware on a PC), `test_app.py` + `fake_board.py` (whole app), `test_heard.py` (Heard Me tab with a pretend PSKReporter).
 
 ## Files
 
-- `app/` — the desktop app (`lopsk_app.py`), PSK31 encoder (`psk31.py`), decoder (`psk31rx.py`), receivers (`rx_sources.py`), and ready-to-flash firmware images.
+- `app/` — the desktop app (`lopsk_app.py`), PSK31 encoder (`psk31.py`), decoder (`psk31rx.py`), receivers (`rx_sources.py`), PSKReporter lookups (`heardme.py`), and ready-to-flash firmware images.
 - `firmware/` — Arduino source. Rebuild with `firmware/build.sh` (arduino-cli + ESP32 core 3.3.x), or open `LoPSK/LoPSK.ino` in the Arduino IDE and uncomment your board at the top of `board.h`.
 
 ## Serial protocol (for tinkering)
